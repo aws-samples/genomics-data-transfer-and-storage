@@ -1,4 +1,4 @@
-# Genomics Data Transfer Industry Accelerator
+# Genomics Data Transfer and Storage on AWS
 
 ## Introduction
 Genomics data is expanding at a rate exceeding Moore’s law. As more sequencing data is produced, and customers move from genotyping to whole genome sequencing, the amount of data produced is outpacing on-prem capacity – customers need cloud solutions for data transfer, storage and management, and downstream scientific analysis. The volume of data
@@ -13,11 +13,13 @@ By simulating an on-premises environment, we demonstrate how to transfer genomic
 
 ## 📋 Table of contents
 
- - [Metrics](#%F0%9F%93%8A-metrics)
- - [Pre-requisites](#%F0%9F%8E%92-pre-requisites)
- - [Deployment](#%F0%9F%9A%80-deployment)
- - [Usage](#%F0%9F%9B%A0-usage)
- - [Cleanup](#%E2%99%BB%EF%B8%8F-cleanup)
+ - [Metrics](#metrics)
+ - [Pre-requisites](#pre-requisites)
+ - [Deployment](#deployment)
+ - [Usage](#usage)
+ - [Cleanup](#cleanup)
+ - [Security](#security)
+ - [License](#license)
 
 ## Metrics
 
@@ -29,7 +31,7 @@ Metric | Value
 **Installation Time** | 15 minutes
 **Audience** | Developers, Solutions Architects
 
-## 🎒 Pre-requisites
+## Pre-requisites
 
 - This repository cloned in your local computer
 - An AWS Account
@@ -41,7 +43,7 @@ Metric | Value
 - Install boto3 (e.g ```pip install boto3```)
 - Install aws-sam-cli (e.g. ```pip install aws-sam-cli```)
 
-## 🚀 Deployment
+## Deployment
 
 In order to run this demo: 
 - Go to the main folder where the repository was cloned, then switch into the _deployment/_ directory
@@ -58,7 +60,7 @@ In order to run this demo:
 
 The deployment script uses AWS SAM to build and package the solution, and then it starts the deployment of an AWS CloudFormation stack.
 
-## 🛠 Usage
+## Usage
 
 ### Running the demo
 
@@ -86,7 +88,7 @@ On the next scheduled AWS DataSync task execution, the text file will be transfe
 
 This feature allows non-technical users to trigger resyncs without needing to understand a command line or log into the AWS console.
 
-## ♻️ Cleanup
+## Cleanup
 
 To avoid incurring future charges, delete the solution by deleting the stack on the AWS CloudFormation console.
 
