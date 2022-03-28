@@ -1,0 +1,21 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - pip3 install -q aws-sam-cli
+      - pip3 install -vU setuptools --upgrade
+      - pip3 install cfn-lint --upgrade
+      - gem install cfn-nag
+      - git clone https://github.com/awslabs/git-secrets.git
+  build:
+    commands:
+      - echo "deploying"
+      - chmod a+x deployment/deploy.sh
+      - cfn-lint -t deployment/cloudformation.yml
+      - cfn_nag_scan --input-path deployment/cloudformation.yml
+      - ./git-secrets/git-secrets --scan-history .
+      - cd deployment
+      - ./deploy.sh ${ARTIFACTS_BUCKET} IndustryKitGenomicsDataTransferStack

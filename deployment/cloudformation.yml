@@ -1,0 +1,1274 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: (SO9041)-Genomics data transfer using AWS DataSync and AWS Lambda- V1.0.0 - Template
+
+Metadata:
+  License:
+    Description: |
+      Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+      Permission is hereby granted, free of charge, to any person obtaining a copy of this
+      software and associated documentation files (the "Software"), to deal in the Software
+      without restriction, including without limitation the rights to use, copy, modify,
+      merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+      permit persons to whom the Software is furnished to do so.
+
+      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+      INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+      PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+      HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+      OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+      SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Parameters:
+  OnPremisesSimulatorVpcDefaultAZ:
+    Description: Default AZ for the On-premises Simulator VPC
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-west-2a
+  OnPremisesSimulatorVpcCIDR:
+    Description: IP range (CIDR notation) for the On-Premises Simulator VPC
+    Type: String
+    Default: 192.168.0.0/16
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}(\\/([0-9]|[1-2][0-9]|3[0-2]))?$"
+    ConstraintDescription: must be a valid IP Range in CIDR notation
+  OnPremisesSimulatorPublicSubnetCIDR:
+    Description: IP range (CIDR notation) for the public subnet within the On-Premises Simulator VPC
+    Type: String
+    Default: 192.168.10.0/24
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}(\\/([0-9]|[1-2][0-9]|3[0-2]))?$"
+    ConstraintDescription: must be a valid IP Range in CIDR notation, the range should be smaller than the VPC CIDR
+  DataSyncAgentAMI:
+    Description: AMI ID for the Simlutated On-Premises DataSync Agent (EC2)
+    Type : 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/datasync/ami'
+  DataSyncAgentInstanceType:
+    Description: Instance Type for the Agent, use m5.2xlarge for tasks <= 20 million files, m5.4xlarge for tasks > 20 million files
+    Type: String
+    AllowedValues:
+      - m5.2xlarge
+      - m5.4xlarge
+    Default: m5.2xlarge
+  DataSyncAgentKey:
+    Description: KeyName from a previously created EC2 Key Pair - If you don''t see a key in the list you will need to create one from the EC2 console in this region
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: GenomicsDatasyncTransfer
+    AllowedPattern: ".+"
+  SequencerOutputPaths:
+    Description: A comma-delimited list of absolute paths where Genomics Sequencers write data to. Used to define writes to EFS in the sequencer simulator, and as prefix paths for the AWS DataSync task scheduler
+    Type: String
+    Default: "/sequencers/incoming/iseq,/sequencers/incoming/nextseq,/sequencers/incoming/miseq,/sequencers/incoming/nextseq2000"
+
+Resources:
+#######################
+# VPC
+#######################
+
+  OnPremisesSimulatorFlowLogRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'vpc-flow-logs.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: 'flowlogs-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+            - 'logs:DescribeLogGroups'
+            - 'logs:DescribeLogStreams'
+            Resource: !GetAtt 'OnPremisesSimulatorFlowLogGroup.Arn'
+
+  OnPremisesSimulatorFlowLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 3
+
+  # On-Premises Simulator VPC
+  OnPremisesSimulatorVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref OnPremisesSimulatorVpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Name
+        Value: On-Premises Simulator VPC
+  
+  OnPremisesSimulatorPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OnPremisesSimulatorVPC
+      AvailabilityZone: !Ref OnPremisesSimulatorVpcDefaultAZ
+      CidrBlock: !Ref OnPremisesSimulatorPublicSubnetCIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: On-Premises Simulator Public Subnet
+  
+  OnPremisesSimulatorInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: On-Premises Simulator IGW
+  
+  OnPremisesSimulatorInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref OnPremisesSimulatorInternetGateway
+      VpcId: !Ref OnPremisesSimulatorVPC
+  
+  OnPremisesSimulatorPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OnPremisesSimulatorVPC
+      Tags:
+        - Key: Name
+          Value: On-Premises Simulator Public Route Table
+  
+  OnPremisesSimulatorPublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref OnPremisesSimulatorPublicRouteTable
+      SubnetId: !Ref OnPremisesSimulatorPublicSubnet
+  
+  OnPremisesSimulatorDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: OnPremisesSimulatorInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref OnPremisesSimulatorPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref OnPremisesSimulatorInternetGateway
+
+  OnPremisesSimulatorFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt OnPremisesSimulatorFlowLogRole.Arn
+      LogGroupName: !Ref OnPremisesSimulatorFlowLogGroup
+      ResourceId: !Ref OnPremisesSimulatorVPC
+      ResourceType: VPC
+      TrafficType: ALL
+      
+  S3VPCEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: "*"
+            Resource: "*"
+      RouteTableIds: 
+      - !Ref OnPremisesSimulatorPublicRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3' 
+      VpcId: !Ref OnPremisesSimulatorVPC  
+
+#######################
+# S3
+#######################
+
+  DestinationBucketIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - datasync.amazonaws.com
+      Tags:
+        - Key: Name
+          Value: DataSync Destination Bucket IAM Role
+  
+  DestinationBucketRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DestinationBucketRolePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref DestinationBucket
+          - Effect: Allow
+            Action:
+              - 's3:CreateMultipartUpload'
+              - 's3:AbortMultipartUpload'
+              - 's3:DeleteObject'
+              - 's3:GetObject'
+              - 's3:ListMultipartUploadParts'
+              - 's3:GetObjectTagging'
+              - 's3:PutObjectTagging'
+              - 's3:PutObject'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref DestinationBucket
+                  - '/*'
+      Roles:
+        - !Ref DestinationBucketIamRole
+
+  # S3 Logging Bucket
+  LoggingBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+  
+  # S3 Bucket to be loaded with data from a genomics sample dataset
+  GenomicsSampleDatasetBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AccessControl: "BucketOwnerFullControl"
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: sequencer-simulator
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: Genomics Sample Dataset Bucket
+  
+  # DataSync Destination S3 Bucket
+  DestinationBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AccessControl: "BucketOwnerFullControl"
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: sync-destination
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierRule
+            #Prefix: glacier
+            Status: Enabled
+            #ExpirationInDays: 365
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+      Tags:
+        - Key: Name
+          Value: Data Sync Destination Bucket
+
+#######################
+# EFS
+#######################
+
+  # EFS File System Resources (where Sequencer Data is written by Lab Instruments)
+  LocalStorageSimulatorFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: maxIO
+      Encrypted: true
+      FileSystemTags:
+      - Key: Name
+        Value: Local Storage Simulator EFS
+  
+  MountTargetSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref OnPremisesSimulatorVPC
+      GroupDescription: Security group for EFS mount target MountTarget
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        CidrIp: !Ref OnPremisesSimulatorPublicSubnetCIDR
+        Description: Allows NFS ingress access to resources within the same subnet
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        CidrIp: !Ref OnPremisesSimulatorPublicSubnetCIDR
+        Description: Allows NFS egress access to resources within the same subnet
+      Tags:
+        - Key: Name
+          Value: Local Storage Simulator Mount Target Security Group
+  
+  MountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref LocalStorageSimulatorFileSystem
+      SubnetId: !Ref OnPremisesSimulatorPublicSubnet
+      SecurityGroups: 
+        - !Ref MountTargetSecurityGroup
+
+  AccessPoint: 
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      FileSystemId: !Ref LocalStorageSimulatorFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0777"
+        Path: "/efs"
+
+#######################
+# EC2
+#######################
+  
+  # On-Premises Simulator DataSync Agent Instance
+  DataSyncAgentIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+        Version: '2012-10-17'
+      Tags:
+        - Key: Name
+          Value: Data Sync On-Premises Simulator Agent IAM Role
+  
+  DataSyncAgentRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - datasync:CreateAgent
+              - datasync:DescribeAgent
+              - datasync:UpdateAgent
+              - datasync:DeleteAgent
+              - datasync:CreateLocationEfs
+              - datasync:CreateLocationNfs
+              - datasync:CreateLocationFsxWindows
+              - datasync:CreateLocationS3
+              - datasync:DeleteLocation
+              - datasync:DescribeLocationEfs
+              - datasync:DescribeLocationNfs
+              - datasync:DescribeLocationFsxWindows
+              - datasync:DescribeLocationS3
+              - datasync:CreateTask
+              - datasync:DescribeTask
+              - datasync:DescribeTaskExecution
+              - datasync:StartTaskExecution
+              - datasync:CancelTaskExecution
+              - datasync:UpdateTask
+              - datasync:UpdateTaskExecution
+              - datasync:DeleteTask
+              - datasync:ListAgents
+              - datasync:ListLocations
+              - datasync:ListTasks
+              - datasync:ListTasksExecutions
+              - datasync:DescribeAgent
+            Resource:
+              - 'arn:aws:datasync:*'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - 'arn:aws:datasync:*'
+            Condition:
+              StringEquals: 
+                'iam:PassedToService': 'datasync.amazonaws.com'
+        Version: '2012-10-17'
+      PolicyName: policy
+      Roles:
+        - !Ref DataSyncAgentIamRole
+  
+  DataSyncAgentInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref DataSyncAgentIamRole
+  
+  DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref OnPremisesSimulatorVPC
+      GroupDescription: Data Sync On-Premises Simulator Agent Instance Security Group
+      Tags:
+        - Key: Name
+          Value: DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+
+  DataSyncOnPremisesSimulatorAgentInstanceSecurityGroupEgressAll:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      CidrIp: "0.0.0.0/0"
+      GroupId: !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+
+      Description: Allows HTTP egress access to the AWS DataSync Agent AMI (to get the activation key) only to resources under GetDataSyncAgentActivationKeyFunctionSecurityGroup
+  
+  DataSyncOnPremisesSimulatorAgentInstanceSecurityGroupIngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      GroupId: !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+      SourceSecurityGroupId: !Ref GetDataSyncAgentActivationKeyFunctionSecurityGroup
+      Description: Allows HTTP ingress access to the AWS DataSync Agent AMI (to get the activation key) only to resources under GetDataSyncAgentActivationKeyFunctionSecurityGroup
+
+  # Opening this port is not mandatory, but you can get the agent activation key with an SSH session.
+  DataSyncOnPremisesSimulatorAgentInstanceSecurityGroupIngressSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      GroupId: !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+      SourceSecurityGroupId: !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+      Description: Allows SSH ingress access to the AWS DataSync Agent AMI (to use the local console) only to resources under the same security group
+  
+  DataSyncOnPremisesSimulatorAgentInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref DataSyncAgentAMI
+      InstanceType: !Ref DataSyncAgentInstanceType
+      IamInstanceProfile: !Ref DataSyncAgentInstanceProfile
+      Tags:
+        - Key: Name
+          Value: Data Sync On-Premises Simulator Agent Instance
+      KeyName: !Ref DataSyncAgentKey
+      InstanceInitiatedShutdownBehavior: stop
+      Monitoring: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 80
+            Encrypted: true
+            DeleteOnTermination: true
+            VolumeType: gp2
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+          SubnetId: !Ref OnPremisesSimulatorPublicSubnet
+
+      
+
+#######################
+# Lambda
+#######################
+  
+  # Security group of lambda function SequencerSimulatorFunction
+  SequencerSimulatorFunctionSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties: 
+      GroupDescription: Security group for Lambda SequencerSimulatorFunction
+      VpcId: !Ref OnPremisesSimulatorVPC
+      Tags:
+        - Key: Name
+          Value: SequencerSimulatorFunctionSecurityGroup
+
+  SequencerSimulatorFunctionSecurityGroupEgressHTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: 
+      GroupId: !Ref SequencerSimulatorFunctionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: "0.0.0.0/0"
+      Description: Allows HTTPS egress to the lambda SequencerSimulatorFunction
+
+  SequencerSimulatorFunctionSecurityGroupEgressNFS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: 
+      GroupId: !Ref SequencerSimulatorFunctionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      CidrIp: !Ref OnPremisesSimulatorPublicSubnetCIDR
+      Description: Allows NFS egress to the lambda SequencerSimulatorFunction only to resources in the same subnet
+  
+  SequencerSimulatorFunctionSecurityGroupIngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !Ref SequencerSimulatorFunctionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      CidrIp: !Ref OnPremisesSimulatorPublicSubnetCIDR
+      Description: Allows NFS ingress to the lambda SequencerSimulatorFunction only to resources in the same subnet
+
+  # Security group of lambda function GetDataSyncAgentActivationKeyFunction
+  GetDataSyncAgentActivationKeyFunctionSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties: 
+      GroupDescription: Security group for Lambda GetDataSyncAgentActivationKeyFunction
+      VpcId: !Ref OnPremisesSimulatorVPC
+      Tags:
+        - Key: Name
+          Value: GetDataSyncAgentActivationKeyFunctionSecurityGroup
+  
+  GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      GroupId: !Ref GetDataSyncAgentActivationKeyFunctionSecurityGroup
+      DestinationSecurityGroupId: !Ref DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+      Description: Allows HTTP egress to the lambda GetDataSyncAgentActivationKeyFunction only to resources under DataSyncOnPremisesSimulatorAgentInstanceSecurityGroup
+  
+  GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: "0.0.0.0/0"
+      GroupId: !Ref GetDataSyncAgentActivationKeyFunctionSecurityGroup
+      Description: Allows HTTP egress to the lambda GetDataSyncAgentActivationKeyFunction
+
+  # IAM Role that allows the LoadGenomicsSampleDatasetBucketFunction lambda the necessary access to perform its task
+  LoadGenomicsSampleDatasetBucketFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ReadfromRegistryOfOpenDataBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                Resource:
+                  - 'arn:aws:s3:::sra-pub-sars-cov2'
+        - PolicyName: ReadfromRegistryOfOpenDataBucketObjects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:GetObject'
+                  - 's3:GetObjectAcl'
+                  - 's3:GetObjectTagging'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - 'arn:aws:s3:::sra-pub-sars-cov2/*'
+        - PolicyName: UploadToGenomicsSampleDatasetBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                Resource: !Sub '${GenomicsSampleDatasetBucket.Arn}'
+        - PolicyName: UploadToGenomicsSampleDatasetBucketObjects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:GetObjectAcl'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl' 
+                  - 's3:CreateMultipartUpload'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:GetObjectTagging'
+                  - 's3:PutObjectTagging'
+                Resource: !Sub '${GenomicsSampleDatasetBucket.Arn}/*'
+
+  # Function that loads the source S3 Bucket with sample lab sequencer data
+  # The source data comes from the registry of open data on AWS
+  LoadGenomicsSampleDatasetBucketFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../source/lambda/load_mock_seq_data_bucket
+      Runtime: python3.9
+      Handler: main.lambda_handler
+      Role: !GetAtt LoadGenomicsSampleDatasetBucketFunctionIAMRole.Arn
+      ReservedConcurrentExecutions: 1
+      Timeout: 720
+      MemorySize: 512
+      Environment: 
+        Variables:
+          # Data about S3 Bucket from the AWS Regsitry of Open Data that contains a sample genomics dataset. 
+          # The Sample Data is of COVID-19 Genome Sequence (https://registry.opendata.aws/ncbi-covid-19/)
+          SRC_BUCKET_REGION: us-east-1
+          SRC_BUCKET_NAME: sra-pub-sars-cov2
+          SRC_BUCKET_PREFIX: run
+          DEST_BUCKET_NAME: !Ref GenomicsSampleDatasetBucket
+          LOG_LEVEL: 'INFO'
+
+  # IAM Role that allows the SequencerSimulatorFunction lambda the necessary access to perform its task
+  SequencerSimulatorFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ENIAccessDescribePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DescribeNetworkInterfacePermissions'
+                  - 'ec2:DescribeDhcpOptions'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeVpcs'
+                  - 'ec2:DescribeInstances'
+                Resource:
+                  - '*'
+        - PolicyName: ENIAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:AssignPrivateIpAddresses'
+                  - 'ec2:UnassignPrivateIpAddresses'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ReadWriteFromGenomicsSampleDatasetBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                Resource: !Sub '${GenomicsSampleDatasetBucket.Arn}'
+        - PolicyName: ReadWriteFromGenomicsSampleDatasetBucketObjects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:GetObjectAcl'
+                  - 's3:GetObjectTagging'
+                Resource: !Sub '${GenomicsSampleDatasetBucket.Arn}/*'
+        - PolicyName: ReadWriteToLocalStorageSimulatorFileSystem
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'elasticfilesystem:ClientMount'
+                  - 'elasticfilesystem:ClientWrite'
+                  - 'elasticfilesystem:DescribeMountTargets'
+                Resource: !GetAtt LocalStorageSimulatorFileSystem.Arn
+  
+  # Function that simulates the work a lab sequencer does to write data to the EFS volume
+  SequencerSimulatorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: MountTarget
+    Properties:
+      CodeUri: ../source/lambda/mock_sequencer
+      Runtime: python3.9
+      Handler: main.lambda_handler
+      Role: !GetAtt SequencerSimulatorFunctionIAMRole.Arn
+      ReservedConcurrentExecutions: 1
+      Timeout: 30
+      MemorySize: 512
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/efs
+      Environment: 
+        Variables:
+          MOCK_SEQ_DATA_BUCKET: !Ref GenomicsSampleDatasetBucket
+          SEQUENCER_OUTPUT_PATHS: !Ref SequencerOutputPaths
+          LOG_LEVEL: 'INFO'
+      VpcConfig: 
+        SecurityGroupIds:
+          - !Ref SequencerSimulatorFunctionSecurityGroup
+        SubnetIds: 
+          - !Ref OnPremisesSimulatorPublicSubnet
+  
+  # IAM Role that allows the GetDataSyncAgentActivationKeyFunction lambda the necessary access to perform its task
+  GetDataSyncAgentActivationKeyFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ENIAccessDescribePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DescribeNetworkInterfacePermissions'
+                  - 'ec2:DescribeDhcpOptions'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeVpcs'
+                  - 'ec2:DescribeInstances'
+                Resource:
+                  - '*'
+        - PolicyName: ENIAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:AssignPrivateIpAddresses'
+                  - 'ec2:UnassignPrivateIpAddresses'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ListCloudFormationCustomResourceBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                Resource: !Sub 'arn:aws:s3:::cloudformation-custom-resource-response-${AWS::Region}' 
+        - PolicyName: ReadWriteCloudFormationCustomResourceBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:*Object'
+                Resource: !Sub 'arn:aws:s3:::cloudformation-custom-resource-response-${AWS::Region}/*' 
+  
+  # Function that gets the DataSync Agent Activation Key
+  GetDataSyncAgentActivationKeyFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - DataSyncOnPremisesSimulatorAgentInstance
+      - S3VPCEndpoint
+      - GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTP
+      - GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTPS
+      - OnPremisesSimulatorInternetGateway
+      - OnPremisesSimulatorInternetGatewayAttachment
+    Properties:
+      CodeUri: ../source/lambda/get_dsync_agent_act_key
+      Runtime: python3.9
+      Handler: main.lambda_handler
+      Role: !GetAtt GetDataSyncAgentActivationKeyFunctionIAMRole.Arn
+      ReservedConcurrentExecutions: 1
+      # * This timeout cannot be decreased, as the lambda function has a sleep of 180 secs to wait for the EC2 instance to initialize
+      Timeout: 300
+      MemorySize: 512
+      Environment: 
+        Variables:
+          LOG_LEVEL: 'DEBUG'
+      VpcConfig: 
+        SecurityGroupIds:
+          - !Ref GetDataSyncAgentActivationKeyFunctionSecurityGroup
+        SubnetIds: 
+          - !Ref OnPremisesSimulatorPublicSubnet
+  
+  # IAM Role that allows the StartDataSyncTaskFunction lambda the necessary access to perform its task
+  StartDataSyncTaskFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: DataSyncStartTaskExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'datasync:ListTasks'
+                  - 'datasync:ListTaskExecutions'
+                  - 'datasync:ListAgents'
+                  - 'datasync:ListLocations'
+                  - 'datasync:DescribeTask'
+                  - 'datasync:DescribeTaskExecution'
+                  - 'datasync:StartTaskExecution'
+                Resource:
+                  - !Sub 'arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:task/*'
+  
+  # Function that configures and triggers AWS DataSync Tasks
+  StartDataSyncTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../source/lambda/start_dsync_task
+      Runtime: python3.9
+      Handler: main.lambda_handler
+      Role: !GetAtt StartDataSyncTaskFunctionIAMRole.Arn
+      ReservedConcurrentExecutions: 1
+      Timeout: 60
+      MemorySize: 512
+      Environment: 
+        Variables:
+          DATA_SYNC_TASK_ARN: !GetAtt EFSToS3DataSyncTask.TaskArn
+          SEQUENCER_OUTPUT_PATHS: !Ref SequencerOutputPaths
+          LOG_LEVEL: 'INFO'
+
+  # IAM Role that allows the S3NotificationLambdaFunction lambda the necessary access to perform its task
+  S3NotificationLambdaFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ReadWriteBucketNotifications
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:GetBucketNotification'
+                  - 's3:PutBucketNotification'
+                  - 's3:GetBucketLocation'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                Resource:
+                  - !GetAtt DestinationBucket.Arn
+  
+  # Function that creates an S3 Notification to the AdhocDataSyncTaskFunction whenever a file is uploaded to the adhoc folder
+  S3NotificationLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../source/lambda/set_s3_adhoc_notification
+      Runtime: python3.9
+      Handler: main.lambda_handler
+      Role: !GetAtt S3NotificationLambdaFunctionIAMRole.Arn
+      ReservedConcurrentExecutions: 1
+      Timeout: 60
+      MemorySize: 512
+      Environment: 
+        Variables:
+          LOG_LEVEL: 'INFO'
+  
+  # IAM Role that allows the AdhocDataSyncTaskFunction lambda the necessary access to perform its task
+  AdhocDataSyncTaskFunctionIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: DataSyncStartTaskExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'datasync:ListTasks'
+                  - 'datasync:ListTaskExecutions'
+                  - 'datasync:ListAgents'
+                  - 'datasync:ListLocations'
+                  - 'datasync:DescribeTask'
+                  - 'datasync:DescribeTaskExecution'
+                  - 'datasync:StartTaskExecution'
+                Resource:
+                  - !Sub 'arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:task/*'
+  
+  # Function that configures and triggers ad-hoc DataSync Tasks 
+  AdhocDataSyncTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../source/lambda/adhoc_dsync_task
+      Handler: main.lambda_handler
+      ReservedConcurrentExecutions: 1
+      Timeout: 180
+      Runtime: python3.9
+      MemorySize: 512
+      Environment:
+        Variables:
+          DATA_SYNC_TASK_ARN: !GetAtt EFSToS3DataSyncTask.TaskArn
+          LOG_LEVEL: 'INFO'
+      # Event created with custom resource instead due to this: https://github.com/aws-cloudformation/cloudformation-coverage-roadmap/issues/79
+      # Events:
+      #   S3Event:
+      #     Type: S3
+      #     Properties:
+      #       Bucket:
+      #         Ref: DestinationBucket
+      #       Events:
+      #         - 's3:ObjectCreated:*'
+      #       Filter:
+      #         S3Key:
+      #           Rules:
+      #           - Name: prefix
+      #             Value: "adhoc" 
+      Role: !GetAtt AdhocDataSyncTaskFunctionIAMRole.Arn
+
+  # Grants permission to the S3 Destination Bucket to Invoke the AdhocDataSyncTaskFunction
+  s3PermissionToInvokeAdhocDataSyncTaskFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AdhocDataSyncTaskFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !GetAtt DestinationBucket.Arn
+
+#######################
+# Lambda Custom Resource
+#######################
+
+  # Invoke Lambda to load S3 Bucket with sample lab sequencer data
+  InvokeLoadGenomicsSampleDatasetBucket:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LoadGenomicsSampleDatasetBucketFunction.Arn
+  
+  # Invoke Lambda to get Agent Activation Key
+  InvokeGetDataSyncAgentActivationKeyFunction:
+    DependsOn: 
+      - GetDataSyncAgentActivationKeyFunctionIAMRole
+      - GetDataSyncAgentActivationKeyFunctionSecurityGroup
+      - GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTP
+      - GetDataSyncAgentActivationKeyFunctionSecurityGroupEgressHTTPS
+      - S3VPCEndpoint
+      - OnPremisesSimulatorDefaultPublicRoute
+      - OnPremisesSimulatorInternetGateway
+      - OnPremisesSimulatorPublicSubnetRouteTableAssociation
+      - OnPremisesSimulatorVPC
+      - OnPremisesSimulatorFlowLog
+      - OnPremisesSimulatorFlowLogRole
+      - OnPremisesSimulatorFlowLogGroup
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt GetDataSyncAgentActivationKeyFunction.Arn
+      AgentInstanceIPAddress: !GetAtt DataSyncOnPremisesSimulatorAgentInstance.PrivateIp
+  
+  # Invoke Lambda to set S3 Notifications for adhoc transfers
+  InvokeS3NotificationLambdaFunction:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt S3NotificationLambdaFunction.Arn
+      LambdaArn: !GetAtt AdhocDataSyncTaskFunction.Arn
+      Bucket: !Ref DestinationBucket
+
+#######################
+# DataSync
+#######################
+  
+  # DataSync Agent
+  DataSyncOnPremisesSimulatorAgent:
+    Type: AWS::DataSync::Agent
+    Properties:
+      ActivationKey: !GetAtt InvokeGetDataSyncAgentActivationKeyFunction.AgentActivationCode
+      AgentName: OnPremisesSimulatorAgent
+      Tags:
+        - Key: Name
+          Value: On-premises Simulator DataSync Agent
+ 
+  # DataSync Source Location (NFS) - NFS for EFS so that the tansfer uses the DataSync Agent
+  DataSyncSourceLocationNFS:
+    Type: AWS::DataSync::LocationNFS
+    DependsOn: 
+    - LocalStorageSimulatorFileSystem
+    Properties:
+      MountOptions:
+        Version: NFS4_1
+      OnPremConfig:
+        AgentArns:
+          - !Ref DataSyncOnPremisesSimulatorAgent
+      ServerHostname: !GetAtt MountTarget.IpAddress
+      Subdirectory: /efs
+ 
+  # DataSync Target Location (S3)
+  DataSyncDestinationLocationS3:
+    Type: AWS::DataSync::LocationS3
+    DependsOn: DataSyncOnPremisesSimulatorAgent
+    Properties:
+      S3BucketArn: !Sub arn:${AWS::Partition}:s3:::${DestinationBucket}
+      S3Config:
+        BucketAccessRoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${DestinationBucketIamRole}
+      S3StorageClass: STANDARD
+
+  # CloudWatch Log Group for the DataSync Task
+  EFSToS3DataSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/datasync/EFSToS3DataSyncLogGroup
+      RetentionInDays: 90
+  
+  # DataSync Task (To copy from Source to Target)
+  EFSToS3DataSyncTask:
+    Type: AWS::DataSync::Task
+    Properties:
+      CloudWatchLogGroupArn: !GetAtt EFSToS3DataSyncLogGroup.Arn
+      DestinationLocationArn: !Ref DataSyncDestinationLocationS3
+      SourceLocationArn: !Ref DataSyncSourceLocationNFS
+      Name: EFS to S3 DataSync Task
+      Options:
+        Atime: BEST_EFFORT #Attempts to preserve last time file was read (atime)
+        LogLevel: TRANSFER #Logs for every object, other option is BASIC which logs only errors
+        Mtime: PRESERVE #Preserves last time a file was modified (mtime)
+        VerifyMode: ONLY_FILES_TRANSFERRED #Verification only on files that were transferred, other option is full scan POINT_IN_TIME_CONSISTENT
+      Tags:
+        - Key: Name
+          Value: EFS to S3 DataSync Task
+
+  # Allow DataSync to publish logs in CloudWatch
+  DataSyncLogsToCloudWatchLogs:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: "DataSyncLogsToCloudWatchLogs"
+      PolicyDocument: "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Sid\": \"DataSyncLogsToCloudWatchLogs\", \"Effect\": \"Allow\", \"Principal\": { \"Service\": [ \"datasync.amazonaws.com\" ] }, \"Action\": [ \"logs:PutLogEvents\", \"logs:CreateLogStream\" ], \"Resource\": \"*\" } ] }"
+
+#######################
+# EventBridge (CloudWatch) Events
+#######################
+ 
+  DataSyncTaskTriggerEvent:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Triggers the EFSToS3DataSyncTask task as specified by the schedule expression
+      # EventPattern: Json
+      Name: DataSyncTaskTriggerEvent
+      # * This rate should be adjusted depending on how long DataSync takes to execute tasks (ideal range between 15 - 30 min)
+      ScheduleExpression: rate(20 minutes)
+      State: DISABLED
+      Targets: 
+        - 
+          Arn: !GetAtt StartDataSyncTaskFunction.Arn
+          Id: "StartDataSyncTaskFunction"
+
+  PermissionForEventsToInvokeStartDataSyncTaskFunction: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "StartDataSyncTaskFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt DataSyncTaskTriggerEvent.Arn
+
+  SequencerSimulatorTaskTriggerEvent:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Triggers the SequencerSimulatorFunction lambda as specified by the schedule expression
+      Name: SequencerSimulatorTaskTriggerEvent
+      ScheduleExpression: rate(5 minutes)
+      State: DISABLED
+      Targets: 
+        - 
+          Arn: !GetAtt SequencerSimulatorFunction.Arn
+          Id: "SequencerSimulatorFunction"
+          Input: '{"sequencer_name": "iseq"}'
+
+  PermissionForEventsToInvokeSequencerSimulatorFunction: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "SequencerSimulatorFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SequencerSimulatorTaskTriggerEvent.Arn
+
+#######################
+# CloudWatch
+#######################
+
+  DataTransferCloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties: 
+      DashboardName: Genomics-Data-Transfer-Monitoring
+      DashboardBody: !Join
+                        - ''
+                        - - '{"start":"-PT4W","periodOverride":"inherit","widgets":[{"height":3,"width":24,"y":0,"x":0,"type":"metric","properties":{"metrics":[["AWS\/DataSync","FilesTransferred","TaskId","'
+                          - !Select [1, !Split ["/", !GetAtt EFSToS3DataSyncTask.TaskArn]]
+                          - '"],[".","FilesPreparedSource",".","."],[".","FilesVerifiedSource",".","."],[".","FilesPreparedDestination",".","."],[".","FilesVerifiedDestination",".","."]],"view":"singleValue","title":"Data Transfer Task Metrics","region":"'
+                          - !Ref AWS::Region
+                          - '","stat":"Sum","period":60,"setPeriodToTimeRange":true}},{"height":3,"width":6,"y":3,"x":0,"type":"metric","properties":{"metrics":[["AWS\/DataSync","FilesTransferred","AgentId","'
+                          - !Select [1, !Split ["/", !Ref DataSyncOnPremisesSimulatorAgent]]
+                          - '"]],"view":"singleValue","title":"Files Transferred by Agent","region":"'
+                          - !Ref AWS::Region
+                          - '","stat":"Sum","period":60,"setPeriodToTimeRange":true,"stacked":false}},{"height":3,"width":18,"y":3,"x":6,"type":"metric","properties":{"metrics":[["AWS\/DataSync","BytesTransferred","AgentId","'
+                          - !Select [1, !Split ["/", !Ref DataSyncOnPremisesSimulatorAgent]]
+                          - '"],[".","BytesWritten",".","."]],"view":"singleValue","title":"Data Transferred by Agent","region":"'
+                          - !Ref AWS::Region
+                          - '","stat":"Sum","period":60,"setPeriodToTimeRange":true,"stacked":true}},{"type":"log","x":0,"y":6,"width":12,"height":6,"properties":{"query":"SOURCE '''
+                          - !Ref EFSToS3DataSyncLogGroup
+                          - ''' | fields @logStream as Log_Stream |\nparse @message \"[*] Transferred file *, * \" as level, file_name, numbytes, bytes | \nfilter @message like \/Transferred file\/ |\nstats count(file_name) as Files_Transferred by Log_Stream |\nsort @timestamp desc |\nlimit 5","region":"'
+                          - !Ref AWS::Region
+                          - '","stacked":false,"view":"pie","title":"Files Transferred by Task Execution - Top 5"}},{"type":"log","x":12,"y":9,"width":12,"height":6,"properties":{"query":"SOURCE '''
+                          - !Ref EFSToS3DataSyncLogGroup
+                          - ''' | fields @logStream as Log_Stream |\nparse @message \"[*] Transferred file *, * \" as level, file_name, numbytes, bytes | \nfilter @message like \/Transferred file\/ |\nstats (sum(numbytes) as Data_Transferred by Log_Stream |\nsort @timestamp desc |\nlimit 5","region":"'
+                          - !Ref AWS::Region
+                          - '","stacked":false,"view":"bar","title":"Data Transferred  by Task Execution - Top 5"}},{"type":"log","x":0,"y":12,"width":24,"height":6,"properties":{"query":"SOURCE '''
+                          - !Ref EFSToS3DataSyncLogGroup
+                          - ''' | fields @logStream |\nparse @message \"[*] Transferred file *, * \" as level, file_name, numbytes,bytes |\nfilter @message like \/Transferred file\/ |\nstats sum(numbytes) as Data_Transferred by bin(1h)","region":"'
+                          - !Ref AWS::Region
+                          - '","stacked":false,"view":"bar","title":"Data Transfer Timeline"}},'
+                          - '{ "type": "log", "x": 12, "y": 18, "width": 12, "height": 6, "properties": { "query": "SOURCE '''
+                          - !Ref EFSToS3DataSyncLogGroup
+                          - ''' | fields @logStream, @timestamp, @message\n| filter @message like \"ERROR\"\n| sort @timestamp desc", "region": "'
+                          - !Ref AWS::Region
+                          - '", "stacked": true, "view": "table", "title": "Data Transfer Errors" } }, { "type": "log", "x": 0, "y": 18, "width": 12, "height": 6, "properties": { "query": "SOURCE '''
+                          - !Ref EFSToS3DataSyncLogGroup
+                          - ''' | fields @logStream, @message |\nfilter @message like \"ERROR\"|\nstats count() as Errors by bin(1h)", "region": "'
+                          - !Ref AWS::Region
+                          - '", "stacked": true, "view": "timeSeries", "title": "Data Transfer Errors Count" } }'
+                          - ']}'
+
+Outputs:
+  AWSInfraInfo:
+    Description: AWS Partition, Region and Account Id
+    Value: !Sub ${AWS::Partition}, ${AWS::Region}, ${AWS::AccountId}
+  MountTargetIPAddress:
+    Description: IP Address of the Mount Target for the EFS File system
+    Value: !GetAtt MountTarget.IpAddress
+  DataSyncDestinationLocationS3BucketArn:
+    Description: DataSyncDestinationLocationS3BucketArn
+    Value: !Sub arn:${AWS::Partition}:s3:::${DestinationBucket}
+  EFSToS3DataSyncTaskArn:
+    Description: ARN of the DataSync Task to transfer files from the EFS File System to S3
+    Value: !Ref EFSToS3DataSyncTask
+  AgentInstancePrivateIPAddress:
+    Description: Private IP of the Data Sync Agent Instance
+    Value: !GetAtt DataSyncOnPremisesSimulatorAgentInstance.PrivateIp
+  AgentArn:
+    Description: Data Sync Agent ARN
+    Value: !Ref DataSyncOnPremisesSimulatorAgent
+  AgentActivationCode:
+    Description: Activation Code of the Data Sync Agent Instance
+    Value: !GetAtt InvokeGetDataSyncAgentActivationKeyFunction.AgentActivationCode
