@@ -235,7 +235,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AccessControl: LogDeliveryWrite
+  #    AccessControl: LogDeliveryWrite
       BucketEncryption: 
         ServerSideEncryptionConfiguration: 
         - ServerSideEncryptionByDefault:
@@ -247,7 +247,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AccessControl: "BucketOwnerFullControl"
+ #     AccessControl: "BucketOwnerFullControl"
       LoggingConfiguration:
         DestinationBucketName: !Ref LoggingBucket
         LogFilePrefix: sequencer-simulator
