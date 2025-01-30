@@ -206,7 +206,7 @@ Resources:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       PolicyDocument:
-        Version: 2012-10-17
+        Version: '2012-10-17'
         Statement:
         - Effect: Allow
           Principal: '*'
@@ -279,7 +279,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AccessControl: LogDeliveryWrite
       BucketEncryption:
         ServerSideEncryptionConfiguration:
         - ServerSideEncryptionByDefault:
@@ -291,7 +290,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      AccessControl: BucketOwnerFullControl
       LoggingConfiguration:
         DestinationBucketName:
           Ref: LoggingBucket
@@ -718,7 +716,7 @@ Resources:
   LoadGenomicsSampleDatasetBucketFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/de72573ba754ebef121896cb1d24c6f9
+      CodeUri: s3://sam-sam-artifacts-bucket/a06e1528630f14854bfa4e468c54883f
       Runtime: python3.9
       Handler: main.lambda_handler
       Role:
@@ -731,8 +729,8 @@ Resources:
       Environment:
         Variables:
           SRC_BUCKET_REGION: us-east-1
-          SRC_BUCKET_NAME: sra-pub-sars-cov2
-          SRC_BUCKET_PREFIX: run
+          SRC_BUCKET_NAME: genomics-benchmark-datasets
+          SRC_BUCKET_PREFIX: google-brain/fastq
           DEST_BUCKET_NAME:
             Ref: GenomicsSampleDatasetBucket
           LOG_LEVEL: INFO
@@ -829,7 +827,7 @@ Resources:
     Type: AWS::Serverless::Function
     DependsOn: MountTarget
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/1eb066eb39f773512a9beb9caffc9a3b
+      CodeUri: s3://sam-sam-artifacts-bucket/1eb066eb39f773512a9beb9caffc9a3b
       Runtime: python3.9
       Handler: main.lambda_handler
       Role:
@@ -940,7 +938,7 @@ Resources:
     - OnPremisesSimulatorInternetGateway
     - OnPremisesSimulatorInternetGatewayAttachment
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/18f4175a8ac9df84036073564a10a227
+      CodeUri: s3://sam-sam-artifacts-bucket/4c9c0608b18afb86f304ae8488f38185
       Runtime: python3.9
       Handler: main.lambda_handler
       Role:
@@ -1002,7 +1000,7 @@ Resources:
   StartDataSyncTaskFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/d1ee466540758770af75d6f4f665f055
+      CodeUri: s3://sam-sam-artifacts-bucket/d1ee466540758770af75d6f4f665f055
       Runtime: python3.9
       Handler: main.lambda_handler
       Role:
@@ -1065,7 +1063,7 @@ Resources:
   S3NotificationLambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/26eae326eda8d8644963d6dae5a0aa43
+      CodeUri: s3://sam-sam-artifacts-bucket/c3e2e1b69c3f34a4a918cc40e450e375
       Runtime: python3.9
       Handler: main.lambda_handler
       Role:
@@ -1122,7 +1120,7 @@ Resources:
   AdhocDataSyncTaskFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://datatransfer-artifacts-sam-1/b356254188be5c3424041fda3cb78270
+      CodeUri: s3://sam-sam-artifacts-bucket/b356254188be5c3424041fda3cb78270
       Handler: main.lambda_handler
       ReservedConcurrentExecutions: 1
       Timeout: 180
@@ -1295,7 +1293,7 @@ Resources:
       Description: Triggers the EFSToS3DataSyncTask task as specified by the schedule
         expression
       Name: DataSyncTaskTriggerEvent
-      ScheduleExpression: rate(15 minutes)
+      ScheduleExpression: rate(20 minutes)
       State: DISABLED
       Targets:
       - Arn:

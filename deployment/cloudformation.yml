@@ -650,11 +650,11 @@ Resources:
       MemorySize: 512
       Environment: 
         Variables:
-          # Data about S3 Bucket from the AWS Regsitry of Open Data that contains a sample genomics dataset. 
-          # The Sample Data is of COVID-19 Genome Sequence (https://registry.opendata.aws/ncbi-covid-19/)
+          # Data about S3 Bucket from the AWS Registry of Open Data that contains a sample genomics dataset. 
+          # The sample data comes from Google Brain Group, which has sequenced 9 human samples covering the Genome in a Bottle truth sets on different sequencing instruments, sequencing modalities, and sample preparation protocols for whole genome and exome capture (https://registry.opendata.aws/google-brain-genomics-public/)
           SRC_BUCKET_REGION: us-east-1
-          SRC_BUCKET_NAME: sra-pub-sars-cov2
-          SRC_BUCKET_PREFIX: run
+          SRC_BUCKET_NAME: genomics-benchmark-datasets
+          SRC_BUCKET_PREFIX: google-brain/fastq
           DEST_BUCKET_NAME: !Ref GenomicsSampleDatasetBucket
           LOG_LEVEL: 'INFO'
 

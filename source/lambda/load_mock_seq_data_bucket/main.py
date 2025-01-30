@@ -38,7 +38,7 @@ def load_data_from_open_registry(event, context):
         total_bytes_transferred = 0
         for file in srcBucket.objects.filter(Prefix=srcBucketPrefix):
             #logger.debug(f"File {file.key}, size {file.size}")
-            #If file is less than fileSizeLimitInMB (to avoid coying very large files from source dataset)
+            #If file is less than fileSizeLimitInMB (to avoid copying very large files from source dataset)
             if file.size <= (fileSizeLimitInMB*1024*1024):
                 #If bytes transferred are > transferLimitInGB, stop the transfer
                 if total_bytes_transferred >= (transferLimitInGB*1024*1024*1024):
